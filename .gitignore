@@ -46,3 +46,7 @@ checkpoints/
 
 # Ignore generated sample .wav files
 **/*.wav
+
+**/finetune_s3gen.py
+
+
