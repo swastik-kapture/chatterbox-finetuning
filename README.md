@@ -1,3 +1,14 @@
+# WIP Fineuning repo for chatterbox tts
+Use the provided finetuning scripts to finetune chatterbox t3 and s3/flow model.
+
+# Usage
+
+```
+python finetune_t3.py --output_dir ./checkpoints/chatterbox_finetuned_yodas --model_name_or_path ResembleAI/chatterbox --dataset_name MrDragonFox/DE_Emilia_Yodas_680h --train_split_name train --eval_split_size 0.0002 --num_train_epochs 1     --per_device_train_batch_size 4 --gradient_accumulation_steps 2 --learning_rate 5e-5 --warmup_steps 100 --logging_steps 10 --eval_strategy steps --eval_steps 2000 --save_strategy steps --save_steps 4000 --save_total_limit 4 --fp16 True --report_to tensorboard --dataloader_num_workers 8 --do_train --do_eval --dataloader_pin_memory False --eval_on_start True --label_names labels_speech --text_column_name text_scribe
+```
+
+
+
 
 <img width="1200" alt="cb-big2" src="https://github.com/user-attachments/assets/bd8c5f03-e91d-4ee5-b680-57355da204d1" />
 
