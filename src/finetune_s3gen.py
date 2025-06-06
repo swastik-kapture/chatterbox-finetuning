@@ -28,10 +28,11 @@ import datasets
 
 # Chatterbox imports
 from chatterbox.tts import ChatterboxTTS # To load the full model initially
-from chatterbox.models.s3gen import S3Gen, S3Token2Mel, S3GEN_SR, mel_spectrogram # S3GEN_SR for mels
+from chatterbox.models.s3gen import S3Gen, S3GEN_SR
+from chatterbox.models.s3gen.s3gen import S3Token2Mel, mel_spectrogram # S3GEN_SR for mels
 from chatterbox.models.s3tokenizer import S3Tokenizer, S3_SR as S3_TOKENIZER_SR # S3Tokenizer operates at 16kHz
-from chatterbox.models.flow import CausalMaskedDiffWithXvec # The actual module we want to finetune
-from chatterbox.models.xvector import CAMPPlus # Speaker encoder used by S3Gen
+from chatterbox.models.s3gen.flow import CausalMaskedDiffWithXvec # The actual module we want to finetune
+from chatterbox.models.s3gen.xvector import CAMPPlus # Speaker encoder used by S3Gen
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ class S3GenFineTuningDataset(Dataset):
             )
             if speech_tokens_batch is None or speech_token_lengths_batch is None: return None
             target_s3_tokens = speech_tokens_batch.squeeze(0) # (T_tokens_s3)
-            speech_token_len = speech_token_lengths_batch.squeeze(0)
+            speech_token_len = torch.tensor(target_s3_tokens.size(0), dtype=torch.long, device="cpu")
             # Ensure token length matches mel length (T_mel = 2 * T_tokens_s3 usually)
             # This alignment is crucial. If S3Tokenizer's max_len truncates differently than mel's max_len, adjust.
             # For simplicity, assume S3Tokenizer's max_len aligns with max_mel_len / 2
@@ -181,12 +182,32 @@ class S3GenFineTuningDataset(Dataset):
             return None
 
         # 3. Speaker Embedding (embedding) from 16kHz audio (as per S3Gen's CAMPPlus usage)
+
+        model_device = next(self.s3gen_model.speaker_encoder.parameters()).device
         try:
-            # speaker_encoder.inference expects (B, L) tensor
-            speaker_embedding = self.s3gen_model.speaker_encoder.inference(wav_16k_tensor.unsqueeze(0)).squeeze(0) # (D_spk)
+            # Temporarily set speaker encoder to eval mode for inference
+            original_training_state = self.s3gen_model.speaker_encoder.training
+            self.s3gen_model.speaker_encoder.eval() # <<< SET TO EVAL MODE
+
+            speaker_embedding_batch = self.s3gen_model.speaker_encoder.inference(
+                wav_16k_tensor.unsqueeze(0).to(model_device) # Input (1, L_wav)
+            )
+            speaker_embedding = speaker_embedding_batch.squeeze(0) # (D_spk)
+
+            # Restore original training state if needed (though for dataset prep, it's fine to leave as eval)
+            # self.s3gen_model.speaker_encoder.train(original_training_state) # Optional, see note below
+
         except Exception as e:
             logger.error(f"Item {idx}: Error getting speaker_embedding: {e}", exc_info=True)
+            # Restore original training state in case of error too
+            # if 'original_training_state' in locals():
+            #    self.s3gen_model.speaker_encoder.train(original_training_state)
             return None
+        finally:
+            # Ensure the model is restored to its original state if you modified it
+            # This is important if the main training loop expects it to be in a certain state.
+            if 'original_training_state' in locals():
+                self.s3gen_model.speaker_encoder.train(original_training_state)
 
         # 4. Prompt features for CausalMaskedDiffWithXvec conditioning
         # prompt_token, prompt_token_len, prompt_feat, prompt_feat_len
@@ -237,16 +258,16 @@ class S3GenFineTuningDataset(Dataset):
                 logger.error(f"Item {idx}: Error processing prompt features: {e}", exc_info=True)
                 return None
         
+        
         return {
             "speech_token": target_s3_tokens.long(),       # Target S3 tokens
             "speech_token_len": speech_token_len.long(), # Length of target S3 tokens
             "speech_feat": target_mel.float(),            # Target mel spectrogram (T_mel, F)
             "speech_feat_len": speech_feat_len.long(),    # Length of target mel (num frames)
             "embedding": speaker_embedding.float(),       # Speaker embedding (x-vector)
-            # For CausalMaskedDiffWithXvec, prompt info is part of conditioning:
-            "prompt_token": prompt_s3_tokens.long(),
-            "prompt_token_len": prompt_s3_token_len.long(),
-            "prompt_feat": prompt_mel.float(),            # (T_mel_prompt, F)
+            "prompt_token_input": prompt_s3_tokens.long(),
+            "prompt_token_len_input": prompt_s3_token_len.long(),
+            "prompt_feat_input": prompt_mel.float(),            # (T_mel_prompt, F)
             # "prompt_feat_len" is implicitly prompt_mel.size(0), flow model might expect it explicitly
             # S3Gen's embed_ref sets prompt_feat_len=None, CausalFlow seems to use prompt_feat.shape[1]
         }
@@ -296,7 +317,7 @@ class S3GenDataCollator:
         embeddings = torch.stack([f["embedding"] for f in valid_features])
 
         # --- Pad prompt features ---
-        prompt_tokens = [f["prompt_token"] for f in valid_features]
+        prompt_tokens = [f["prompt_token_input"] for f in valid_features]
         # Use a fixed max prompt length if required by model, else pad to max in batch
         # target_prompt_token_len = self.max_prompt_token_len_collator or max(pt.size(0) for pt in prompt_tokens)
         target_prompt_token_len = max(pt.size(0) for pt in prompt_tokens) if prompt_tokens else 0
@@ -305,9 +326,9 @@ class S3GenDataCollator:
         padded_prompt_tokens = torch.stack(
              [F.pad(pt, (0, target_prompt_token_len - pt.size(0)), value=self.speech_token_pad_id) for pt in prompt_tokens]
         )
-        prompt_token_lens = torch.stack([f["prompt_token_len"] for f in valid_features])
+        prompt_token_lens = torch.stack([f["prompt_token_len_input"] for f in valid_features])
 
-        prompt_feats = [f["prompt_feat"] for f in valid_features]
+        prompt_feats = [f["prompt_feat_input"] for f in valid_features]
         # target_prompt_mel_len = self.max_prompt_mel_len_collator or max(pf.size(0) for pf in prompt_feats)
         target_prompt_mel_len = max(pf.size(0) for pf in prompt_feats) if prompt_feats else 0
         target_prompt_mel_len = max(1, target_prompt_mel_len)
@@ -336,21 +357,6 @@ class S3GenDataCollator:
             'speech_feat': padded_speech_feats.to(device), # This is the target mel
             'speech_feat_len': speech_feat_lens.to(device),
             'embedding': embeddings.to(device),
-            # These are needed for CausalMaskedDiffWithXvec's conditioning during its internal forward call.
-            # The structure for Causal model might embed these within `h` or `conds` for CFM.
-            # For now, let's pass them explicitly, the wrapper will need to handle them.
-            # CausalMaskedDiffWithXvec's *training* forward is NOT DEFINED in flow.py.
-            # It only has an `inference` method.
-            # MaskedDiffWithXvec has a training forward. We assume Causal* would be similar.
-            # The `compute_loss` of its `decoder` (CausalConditionalCFM) expects:
-            # x (target_mel), mask, cond (encoder_out_h), spk_emb, cond (prompt_mel)
-            # So, the flow model's forward needs to prepare these.
-
-            # For the Trainer, the keys passed to S3GenFlowForFineTuning.forward need to be here.
-            # Let's assume S3GenFlowForFineTuning.forward will take these and construct the necessary inputs for
-            # s3gen_model.flow.decoder.compute_loss, potentially via a simplified s3gen_model.flow.train_forward().
-
-            # Required by CausalMaskedDiffWithXvec.inference, likely also needed for training cond:
             "prompt_token_input": padded_prompt_tokens.to(device),
             "prompt_token_len_input": prompt_token_lens.to(device),
             "prompt_feat_input": padded_prompt_feats.to(device),
@@ -362,8 +368,8 @@ class S3GenDataCollator:
 class S3GenFlowForFineTuning(torch.nn.Module):
     def __init__(self, s3gen_token_to_mel: S3Token2Mel): # Pass S3Token2Mel instance
         super().__init__()
-        self.s3_token_to_mel = s3gen_token_to_mel
-        self.flow_model: CausalMaskedDiffWithXvec = self.s3_token_to_mel.flow # type: ignore
+        #self.s3_token_to_mel = s3gen_token_to_mel
+        self.flow_model: CausalMaskedDiffWithXvec = s3gen_token_to_mel.flow # type: ignore
         
         # Create a dummy HF Compatible Config
         class HFCompatibleConfig(PretrainedConfig):
@@ -373,138 +379,113 @@ class S3GenFlowForFineTuning(torch.nn.Module):
         self.config = HFCompatibleConfig()
         # Populate self.config with relevant params from s3_token_to_mel or flow_model if needed
 
-    def forward(self, 
-                speech_token: torch.Tensor,        # Target S3 tokens for the flow model's encoder
-                speech_token_len: torch.Tensor,
-                speech_feat: torch.Tensor,         # Target mel features (T_mel, F)
-                speech_feat_len: torch.Tensor,
-                embedding: torch.Tensor,           # Speaker embedding
-                prompt_token_input: torch.Tensor,  # Prompt S3 tokens for conditioning
-                prompt_token_len_input: torch.Tensor,
-                prompt_feat_input: torch.Tensor,   # Prompt mel features for conditioning
-                labels = None # Unused, for Trainer compatibility
-                ):
-        # The CausalMaskedDiffWithXvec does not have a `forward` for training in your flow.py.
-        # It has `inference`. We need to call the `decoder.compute_loss` part.
-        # This usually happens within a training-specific forward method of the flow model.
-        # Let's assume we add a `train_step` or `compute_train_loss` to CausalMaskedDiffWithXvec.
-        # Or, we replicate the logic from MaskedDiffWithXvec.forward here.
+    # In S3GenFlowForFineTuning.forward (Simplified Slicing)
 
-        # Replicating logic from MaskedDiffWithXvec.forward:
+    def forward(self,
+                speech_token: torch.Tensor,
+                speech_token_len: torch.Tensor,
+                speech_feat: torch.Tensor,          # Target mel (B, T_target_mel_collator, F)
+                speech_feat_len: torch.Tensor,
+                embedding: torch.Tensor,
+                prompt_token_input: torch.Tensor,
+                prompt_token_len_input: torch.Tensor,
+                prompt_feat_input: torch.Tensor,    # Prompt mel (B, T_prompt_mel_collator, F)
+                labels = None
+                ):
+
         # 1. Project speaker embedding
         projected_speaker_emb = self.flow_model.spk_embed_affine_layer(F.normalize(embedding, dim=1))
 
-        # 2. Encode input `speech_token` (these are the main tokens, not prompt)
-        #    For Causal model, the encoder takes concatenated prompt_token + speech_token.
-        #    The `token` input to Causal*.inference is already the main content tokens.
-        #    The `prompt_token` is separate.
-        
-        # Encoder input for Causal model: concat prompt_token and main speech_token
+        # 2. Prepare 'mu' (linguistic conditioning from concatenated prompt and target tokens, then sliced for target)
         full_input_tokens = torch.cat([prompt_token_input, speech_token], dim=1)
         full_input_token_lens = prompt_token_len_input + speech_token_len
-
-        input_token_embed = self.flow_model.input_embedding(torch.clamp(full_input_tokens, min=0))
-        # Apply mask based on full_input_token_lens if encoder expects it
-        # mask = (~make_pad_mask(full_input_token_lens)).float().unsqueeze(-1).to(input_token_embed.device)
-        # input_token_embed = input_token_embed * mask
-        
-        # Text encode (actually, semantic token encode)
-        # h is the output of the upsample_encoder
-        h, h_lengths = self.flow_model.encoder(input_token_embed, full_input_token_lens) 
-        # For Causal, if `finalize=False` was used in inference, it slices h.
-        # For training, we usually use the full length.
-        # The target `speech_feat` corresponds to the `speech_token` part, not the prompt part.
-        # So `h` needs to be sliced or length adjusted if it was for full_input_tokens.
-        # The `CausalMaskedDiffWithXvec.inference` does:
-        #   h, h_lengths = self.encoder(token_embed_for_full_sequence, token_len_for_full_sequence)
-        #   if finalize is False: h = h[:, :-self.pre_lookahead_len * self.token_mel_ratio]
-        #   mel_len2 = h.shape[1] - prompt_feat.shape[1] (mel_len1)
-        # So `h` from encoder corresponds to `prompt_mel_len + actual_mel_len`.
-        # The target `speech_feat` has length `speech_feat_len`.
-        
-        # We need `h` that corresponds in length to `speech_feat` after upsampling and projection.
-        # The upsample encoder in Causal flow model directly outputs features at mel_frame rate.
-        # `h` from `self.flow_model.encoder` is already at mel rate.
-        # It needs to be sliced to get the part corresponding to `speech_token` (not `prompt_token_input`).
-        
-        # `h` has shape (B, T_encoded_prompt + T_encoded_speech, D_encoder_proj)
-        # We need the part of `h` that corresponds to `speech_token` for conditioning the CFM decoder.
-        # Length of encoded prompt part: prompt_token_len_input (token rate) -> prompt_mel_len_input (mel rate)
-        # Length of encoded speech part: speech_token_len (token rate) -> speech_feat_len (mel rate)
-        # The upsampler encoder in Causal flow does this length change.
-        # `h_lengths` should correspond to `prompt_mel_len + speech_mel_len`.
-        
-        h_projected = self.flow_model.encoder_proj(h) # (B, T_prompt_mel + T_speech_mel, D_output)
-
-        # The CFM decoder (`self.flow_model.decoder`) needs:
-        # x (target_mel): speech_feat.transpose(1,2) -> (B, F, T_mel)
-        # cond (encoder_out): h_for_target_mel.transpose(1,2) -> (B, D_output, T_mel)
-        # spks: projected_speaker_emb
-        # cond (prompt_mel for CFM): prompt_feat_input.transpose(1,2) -> (B, F, T_prompt_mel)
-
-        # Slice h_projected to get only the part for the target speech tokens
-        # prompt_mel_len_from_input_feat = prompt_feat_input.size(1) # T_prompt_mel
-        # h_for_target_mels = h_projected[:, prompt_mel_len_from_input_feat : prompt_mel_len_from_input_feat + speech_feat.size(1), :]
-        # This slicing based on prompt_feat_input might be tricky if padding differs.
-        # Simpler: `h_projected` from encoder covers both prompt and target. Decoder needs to know prompt length.
-
-        # The CausalConditionalCFM.compute_loss needs `cond` (h_projected) and `x` (speech_feat)
-        # and it internally handles the prompt via its `cond` argument if it's `prompt_feat_input`.
-        # The `mu` in CausalConditionalCFM is `h_projected`.
-        # `self.flow_model.decoder` is `CausalConditionalCFM`
-        
-        # Target mels: (B, T_mel, F) -> need (B, F, T_mel) for CFM
-        target_mels_for_cfm = speech_feat.transpose(1,2).contiguous()
-        
-        # Conditioning from encoder: (B, T_total_mel, D) -> need (B, D, T_total_mel) for CFM
-        encoder_output_for_cfm = h_projected.transpose(1,2).contiguous()
-
-        # Prompt mels for CFM conditioning: (B, T_prompt_mel, F) -> (B, F, T_prompt_mel)
-        prompt_mels_for_cfm_cond = prompt_feat_input.transpose(1,2).contiguous()
-        
-        # Create mask for target_mels_for_cfm based on speech_feat_len
-        # Mask shape (B, 1, T_mel)
-        target_mel_mask = (~self.make_pad_mask(speech_feat_len, max_len=target_mels_for_cfm.size(2))).unsqueeze(1).to(target_mels_for_cfm.device)
-        # The CFM model internally requires mu (encoder_output_for_cfm) to have same T dim as x (target_mels_for_cfm)
-        # This implies CausalMaskedDiffWithXvec's encoder output `h` must be sliced to match only the target part for CFM loss calculation,
-        # OR the CFM decoder handles prompts by taking the full `h` and a `prompt_len` argument.
-        # CausalConditionalCFM's forward pass takes `prompt_len`.
-
-        # From CausalMaskedDiffWithXvec.inference:
-        # feat, _ = self.decoder(mu=h.transpose(1,2), ..., cond=prompt_mels_for_cfm_cond, ..., prompt_len=mel_len1)
-        # This means `mu` (h_projected) must correspond to the *full* sequence (prompt + target).
-        # And `x` in `compute_loss` (target_mels_for_cfm) corresponds to the *target* part.
-        # The `prompt_len` argument to CFM.compute_loss tells it how much of `mu` is prompt.
-        
-        prompt_mel_len_for_cfm = prompt_feat_input.size(1) # T_prompt_mel from input
-
-        loss_dict = self.flow_model.decoder.compute_loss(
-            x=target_mels_for_cfm,            # Target mels (B, F, T_target_mel)
-            mask=target_mel_mask,             # Mask for target mels (B, 1, T_target_mel)
-            mu=encoder_output_for_cfm,        # Encoder output for (prompt+target) (B, D, T_total_mel)
-            spks=projected_speaker_emb,       # Speaker embedding
-            cond=prompt_mels_for_cfm_cond,    # Prompt mels for conditioning CFM (B, F, T_prompt_mel)
-            prompt_len=prompt_mel_len_for_cfm # Length of prompt part in mu and cond
+        vocab_size = getattr(self.flow_model, 'vocab_size', 6561)
+        input_token_embed = self.flow_model.input_embedding(
+            torch.clamp(full_input_tokens, min=0, max=vocab_size - 1)
         )
-        
-        # loss_dict likely contains {'loss': tensor, 'reg_loss': tensor, ...}
-        # We primarily care about the main 'loss' for backprop.
-        # Can return others for logging if needed.
-        main_loss = loss_dict['loss']
-        if 'reg_loss' in loss_dict: # Add regularization if present
-            main_loss += loss_dict['reg_loss']
+        h_encoded_full, _ = self.flow_model.encoder(input_token_embed, full_input_token_lens)
+        h_projected_full = self.flow_model.encoder_proj(h_encoded_full)
+        mu_full_for_cfm = h_projected_full.transpose(1, 2).contiguous()
 
-        return (main_loss, loss_dict.get('loss'), loss_dict.get('reg_loss')) # Return tuple for Trainer
+        # 3. Prepare target mels (x1)
+        target_mels_for_cfm_x = speech_feat.transpose(1, 2).contiguous() # (B, F, T_target_mel_collator)
+        target_mel_mask = (~self.make_pad_mask(speech_feat_len, max_len=target_mels_for_cfm_x.size(2))).unsqueeze(1)
+
+        # 4. Prepare 'cond' (acoustic prompt)
+        # Original prompt mels: (B, F, T_prompt_mel_collator)
+        original_prompt_mels = prompt_feat_input.transpose(1, 2).contiguous()
+        
+        # MODIFICATION: Pad 'cond' to match the time dimension of 'x1' (target_mels_for_cfm_x)
+        # This assumes 'cond' provides information for the initial part, and is neutral for the rest.
+        T_target_mel_collator = target_mels_for_cfm_x.size(2) # e.g., 1633
+        T_prompt_mel_collator = original_prompt_mels.size(2)  # e.g., 150
+
+        if T_prompt_mel_collator > T_target_mel_collator:
+            # This case should ideally not happen if target is longer than prompt.
+            # If it does, truncate the prompt to fit.
+            padded_prompt_mels_for_cond = original_prompt_mels[:, :, :T_target_mel_collator]
+            logger.warning(f"Prompt mel length ({T_prompt_mel_collator}) was longer than target mel length ({T_target_mel_collator}). Prompt was truncated.")
+        else:
+            padding_size = T_target_mel_collator - T_prompt_mel_collator
+            # Pad original_prompt_mels on the time dimension (last dim)
+            # Pad with zeros, assuming zeros mean "no conditioning" for the padded part.
+            # The UNet should learn to interpret this.
+            padded_prompt_mels_for_cond = F.pad(original_prompt_mels, (0, padding_size), mode='constant', value=0)
+        # Now, padded_prompt_mels_for_cond has shape (B, F, T_target_mel_collator)
+
+        # 5. Slice mu_full_for_cfm to get mu_target, aligned with target_mels_for_cfm_x
+        num_prompt_mel_frames_collator = T_prompt_mel_collator # Using the original prompt length for slicing mu
+        num_target_mel_frames_collator = T_target_mel_collator
+
+        slice_start_idx = num_prompt_mel_frames_collator
+
+        if slice_start_idx >= mu_full_for_cfm.size(2):
+            logger.error(f"MU SLICING ERROR: mu_full_for_cfm (len {mu_full_for_cfm.size(2)}) too short for prompt part (len {slice_start_idx})")
+            mu_conditioning_for_target_mels = torch.zeros_like(target_mels_for_cfm_x.float().expand(-1, mu_full_for_cfm.size(1), -1))
+        else:
+            mu_target_raw_slice = mu_full_for_cfm[:, :, slice_start_idx:]
+            current_raw_target_slice_len = mu_target_raw_slice.size(2)
+            if current_raw_target_slice_len < num_target_mel_frames_collator:
+                padding_needed = num_target_mel_frames_collator - current_raw_target_slice_len
+                mu_conditioning_for_target_mels = F.pad(mu_target_raw_slice, (0, padding_needed))
+            elif current_raw_target_slice_len > num_target_mel_frames_collator:
+                mu_conditioning_for_target_mels = mu_target_raw_slice[:, :, :num_target_mel_frames_collator]
+            else:
+                mu_conditioning_for_target_mels = mu_target_raw_slice
+
+        # 6. Compute CFM loss
+        cfm_loss_output, _ = self.flow_model.decoder.compute_loss(
+            x1=target_mels_for_cfm_x,
+            mask=target_mel_mask,
+            mu=mu_conditioning_for_target_mels,
+            spks=projected_speaker_emb,
+            cond=padded_prompt_mels_for_cond # Use the padded cond
+        )
+
+        main_loss = cfm_loss_output
+        return (main_loss, main_loss, torch.tensor(0.0, device=main_loss.device))
+
 
     def make_pad_mask(self, lengths: torch.Tensor, max_len: Optional[int] = None) -> torch.Tensor:
-        # Helper from CosyVoice/utils/mask.py, adapted
+        # ... (same as before) ...
+        if not isinstance(lengths, torch.Tensor):
+            lengths = torch.as_tensor(lengths, dtype=torch.long)
         if max_len is None:
-            max_len = torch.max(lengths).item()
+            if lengths.numel() == 0: # Handle empty lengths tensor
+                max_len = 0
+            else:
+                max_len = torch.max(lengths).item()
+
         bs = lengths.size(0)
+        if bs == 0: # Handle batch size of 0
+             return torch.empty(0, max_len, dtype=torch.bool, device=lengths.device)
+
         seq_range = torch.arange(0, max_len, device=lengths.device)
         seq_range_expand = seq_range.unsqueeze(0).expand(bs, max_len)
         seq_length_expand = lengths.unsqueeze(1).expand_as(seq_range_expand)
         return seq_range_expand >= seq_length_expand
+
+    
 
 
 # Global trainer instance

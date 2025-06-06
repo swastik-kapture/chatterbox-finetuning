@@ -43,9 +43,9 @@ def mel_spectrogram(y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=48
         y = y[None, ]
 
     if torch.min(y) < -1.0:
-        print("min value is ", torch.min(y))
+        pass#print("min value is ", torch.min(y))
     if torch.max(y) > 1.0:
-        print("max value is ", torch.max(y))
+        pass#print("max value is ", torch.max(y))
 
     global mel_basis, hann_window  # pylint: disable=global-statement,global-variable-not-assigned
     if f"{str(fmax)}_{str(y.device)}" not in mel_basis:

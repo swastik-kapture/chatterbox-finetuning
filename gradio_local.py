@@ -17,14 +17,14 @@ def set_seed(seed: int):
 
 
 def load_model():
-    model = ChatterboxTTS.from_local(ckpt_dir=str("/home/germanwahnsinn/chatterbox/src/checkpoints/test/"), device=DEVICE)
+    model = ChatterboxTTS.from_local(ckpt_dir=str("path/to/model/dir"), device=DEVICE)
     print("local")
     return model
 
 
 def generate(model, text, audio_prompt_path, exaggeration, temperature, seed_num, cfgw):
     if model is None:
-        model = ChatterboxTTS.from_local(ckpt_dir=str("/home/germanwahnsinn/chatterbox/src/checkpoints/test/"), device=DEVICE)
+        model = ChatterboxTTS.from_local(ckpt_dir=str("path/to/model/dir"), device=DEVICE)
 
     if seed_num != 0:
         set_seed(int(seed_num))
