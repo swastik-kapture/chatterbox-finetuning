@@ -47,6 +47,5 @@ checkpoints/
 # Ignore generated sample .wav files
 **/*.wav
 
-
-
-
+# Environment vars
+.env

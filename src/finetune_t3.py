@@ -22,7 +22,7 @@ from transformers import (
     PretrainedConfig
 )
 from transformers import TrainingArguments as HfTrainingArguments
-from datasets import load_dataset, DatasetDict, VerificationMode, Audio
+from datasets import load_dataset, load_from_disk, DatasetDict, VerificationMode, Audio
 import datasets
 
 from chatterbox.tts import ChatterboxTTS, Conditionals, punc_norm, REPO_ID
@@ -33,10 +33,6 @@ from chatterbox.models.s3gen import S3GEN_SR
 
 #from chatterbox.utils.t3data_arguments import DataArguments
 #from chatterbox.utils.t3dataset import SpeechFineTuningDataset
-
-
-
-
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +79,10 @@ class DataArguments:
     dataset_config_name: Optional[str] = field(
         default=None,
         metadata={"help": "The configuration name of the dataset to use (via the Hugging Face datasets library)."}
+    )
+    load_from_disk_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a dataset previously saved with `Dataset.save_to_disk()` for use with `load_from_disk()`."}
     )
     train_split_name: str = field(default="train", metadata={"help": "The name of the training data set split."})
     eval_split_name: Optional[str] = field(default="validation", metadata={"help": "The name of the evaluation data set split."})
@@ -486,6 +486,22 @@ def main():
                 train_hf_dataset, eval_hf_dataset = split_dataset["train"], split_dataset["test"]
                 logger.info(f"Evaluation set size: {len(eval_hf_dataset)}")
             else: logger.warning("Evaluation requested but no eval split found/configured or train dataset too small to split. Skipping eval dataset.")
+        is_hf_format_train, is_hf_format_eval = True, True
+    elif data_args.load_from_disk_dir:
+        logger.info(f"Loading dataset from disk: {data_args.load_from_disk_dir}")
+        train_hf_dataset = load_from_disk(data_args.load_from_disk_dir)
+
+        if training_args.do_eval:
+            if data_args.eval_split_size > 0 and len(train_hf_dataset) > 1:
+                logger.info(
+                    f"Splitting train dataset for evaluation with ratio {data_args.eval_split_size}"
+                )
+                split_dataset = train_hf_dataset.train_test_split(
+                    test_size=data_args.eval_split_size, seed=training_args.seed
+                )
+                train_hf_dataset, eval_hf_dataset = split_dataset["train"], split_dataset["test"]
+            else:
+                logger.warning("No eval split found or created. Evaluation will be skipped.")
         is_hf_format_train, is_hf_format_eval = True, True
     else:
         all_files = []
