@@ -12,7 +12,8 @@ python finetune_t3.py \
 --output_dir ./checkpoints/chatterbox_finetuned_yodas \
 --model_name_or_path ResembleAI/chatterbox \
 --dataset_name MrDragonFox/DE_Emilia_Yodas_680h \
---train_split_name train --eval_split_size 0.0002 \
+--train_split_name train \
+--eval_split_size 0.0002 \
 --num_train_epochs 1 \
 --per_device_train_batch_size 4 \
 --gradient_accumulation_steps 2 \
