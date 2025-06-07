@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ChatterBox TTS Playground</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+</head>
+<body class="bg-light">
+  <div class="container py-5">
+    <div class="row justify-content-center">
+      <div class="col-lg-8">
+        <div class="card shadow rounded-4">
+          <div class="card-body">
+            <h1 class="card-title text-center mb-4">
+              ChatterBox TTS Playground
+            </h1>
+
+            <div class="mb-4">
+              <h5>Upload Audio Prompt</h5>
+              <form id="upload-form" enctype="multipart/form-data">
+                <div class="input-group">
+                  <input
+                    type="file"
+                    name="file"
+                    id="file-input"
+                    accept="audio/*"
+                    class="form-control"
+                    required
+                  />
+                  <button class="btn btn-outline-secondary" type="submit" id="upload-btn">
+                    Upload
+                  </button>
+                </div>
+              </form>
+              <div id="upload-status" class="mt-2 text-muted small"></div>
+            </div>
+
+
+            <div class="mb-4">
+              <h5>Available Audio Prompts</h5>
+              <select id="audio-select" class="form-select">
+                <option value="">(None)</option>
+              </select>
+              <audio id="audio-preview" controls class="w-100 mt-2"></audio>
+            </div>
+
+            <form id="tts-form">
+              <div class="mb-3">
+                <label for="input" class="form-label">Input Text</label>
+                <textarea
+                  name="input"
+                  id="input"
+                  class="form-control"
+                  rows="5"
+                  required
+                >Hello world! Welcome to this exciting journey of Kapture TTS. Every great creation begins with a simple idea ... and this is probably, a step and a half.</textarea>
+              </div>
+
+              <div class="mb-3">
+                <label for="voice" class="form-label">Voice</label>
+                <select name="voice" id="voice" class="form-select">
+                  {% for voice in voices %}
+                  <option value="{{ voice }}">{{ voice }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+
+              <div class="form-check mb-3">
+                <input
+                  class="form-check-input"
+                  type="checkbox"
+                  name="stream"
+                  id="stream"
+                />
+                <label class="form-check-label" for="stream">Streaming Mode</label>
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-primary btn-lg" id="generate-btn">
+                  Synthesize
+                </button>
+              </div>
+            </form>
+
+            <div class="mt-4">
+              <h5>Audio Output</h5>
+              <audio id="audio-output" controls class="w-100 mt-2"></audio>
+              <div id="status" class="mt-2 text-muted small"></div>
+            </div>
+          </div>
+        </div>
+        <p class="text-center mt-3 text-muted">
+          Built with ❤️ by Swastik Nath using ⚡ FastAPI & Bootstrap 5.
+        </p>
+        <p class="text-center mt-1 text-muted">
+          Finetune checkpoint from: Sun 8 Jun, 00:02 [10000 steps, 12 batch size]
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const SAMPLE_RATE = 24000;
+    const uploadForm = document.getElementById("upload-form");
+    const fileInput = document.getElementById("file-input");
+    const uploadBtn = document.getElementById("upload-btn");
+    const uploadStatus = document.getElementById("upload-status");
+    const audioSelect = document.getElementById("audio-select");
+    const audioPreview = document.getElementById("audio-preview");
+    const ttsForm = document.getElementById("tts-form");
+    const audioOutput = document.getElementById("audio-output");
+    const statusText = document.getElementById("status");
+    const generateBtn = document.getElementById("generate-btn");
+
+    async function refreshUploadedList() {
+      const res = await fetch("/v1/chatterbox/list_audio");
+      if (!res.ok) {
+        console.error("Failed to list uploaded files");
+        return;
+      }
+      const data = await res.json();
+      // Clear current options (except the default "(None)")
+      audioSelect.innerHTML = '<option value="">(None)</option>';
+      data.files.forEach((fname) => {
+        const opt = document.createElement("option");
+        opt.value = fname;
+        opt.innerText = fname;
+        audioSelect.appendChild(opt);
+      });
+    }
+
+    audioSelect.addEventListener("change", () => {
+      const selected = audioSelect.value;
+      if (!selected) {
+        audioPreview.src = "";
+        return;
+      }
+      audioPreview.src = `/uploads/${selected}`;
+      audioPreview.load();
+    });
+
+
+    uploadForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!fileInput.files.length) return;
+      uploadBtn.disabled = true;
+      uploadStatus.innerText = "Uploading...";
+
+      const formData = new FormData();
+      formData.append("file", fileInput.files[0]);
+
+      try {
+        const res = await fetch("/v1/chatterbox/upload_audio", {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) throw new Error("Upload failed");
+        const data = await res.json();
+        uploadStatus.innerText = `✔️ Uploaded: ${data.filename}`;
+        fileInput.value = ""; // clear selection
+        await refreshUploadedList();
+      } catch (err) {
+        console.error(err);
+        uploadStatus.innerText = `❌ Error: ${err.message}`;
+      } finally {
+        uploadBtn.disabled = false;
+        setTimeout(() => {
+          uploadStatus.innerText = "";
+        }, 3000);
+      }
+    });
+
+
+    ttsForm.onsubmit = async (e) => {
+      e.preventDefault();
+      generateBtn.disabled = true;
+      statusText.innerText = "Synthesizing...";
+      audioOutput.src = "";
+
+      const formData = new FormData(ttsForm);
+      const payload = {
+        model: "tts-1",
+        input: formData.get("input"),
+        voice: formData.get("voice"),
+        response_format: "wav",
+        stream: formData.get("stream") === "on",
+        audio_prompt_path: audioSelect.value || "",
+      };
+
+      try {
+        if (payload.stream) {
+          const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: SAMPLE_RATE,
+          });
+          let nextStartTime = 0;
+
+          const response = await fetch("/v1/chatterbox/speech", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) throw new Error(await response.text());
+
+          const reader = response.body.getReader();
+          let buffer = new Uint8Array();
+
+          const scheduleBuffer = (pcmInt16) => {
+            const float32 = new Float32Array(pcmInt16.length);
+            for (let i = 0; i < pcmInt16.length; i++) {
+              float32[i] = pcmInt16[i] / 32768;
+            }
+            const audioBuffer = audioContext.createBuffer(1, float32.length, SAMPLE_RATE);
+            audioBuffer.copyToChannel(float32, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+
+            const currentTime = audioContext.currentTime;
+            if (nextStartTime < currentTime) {
+              nextStartTime = currentTime + 0.05;
+            }
+            source.onended = () => source.disconnect();
+            source.start(nextStartTime);
+            nextStartTime += audioBuffer.duration;
+          };
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            while (buffer.length >= 2048) {
+              const chunk = buffer.slice(0, 2048);
+              buffer = buffer.slice(2048);
+
+              const view = new DataView(chunk.buffer);
+              const pcm = new Int16Array(chunk.length / 2);
+              for (let i = 0; i < pcm.length; i++) {
+                pcm[i] = view.getInt16(i * 2, true);
+              }
+              scheduleBuffer(pcm);
+            }
+          }
+
+          setTimeout(() => audioContext.close(), 5000);
+        } else {
+          const response = await fetch("/v1/chatterbox/speech", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) throw new Error(await response.text());
+
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          audioOutput.src = url;
+          audioOutput.play();
+        }
+
+        statusText.innerText = "✔️ Done";
+      } catch (err) {
+        console.error(err);
+        statusText.innerText = "❌ Error: " + err.message;
+      } finally {
+        generateBtn.disabled = false;
+      }
+    };
+
+    // On page load, fetch the existing uploaded files
+    document.addEventListener("DOMContentLoaded", refreshUploadedList);
+  </script>
+</body>
+</html>
