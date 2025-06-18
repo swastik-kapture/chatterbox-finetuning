@@ -97,7 +97,7 @@
           Built with ❤️ by Swastik Nath using ⚡ FastAPI & Bootstrap 5.
         </p>
         <p class="text-center mt-1 text-muted">
-          Finetune checkpoint from: Sun 8 Jun, 00:02 [10000 steps, 12 batch size]
+          Finetune checkpoint from: Mon 9 Jun, 10:02 [58000 steps, 12 batch size]
         </p>
       </div>
     </div>
@@ -188,7 +188,7 @@
         voice: formData.get("voice"),
         response_format: "wav",
         stream: formData.get("stream") === "on",
-        audio_prompt_path: audioSelect.value || "",
+        audio_prompt_path: audioSelect?.value || "",
       };
 
       try {
@@ -250,7 +250,7 @@
             }
           }
 
-          setTimeout(() => audioContext.close(), 5000);
+          setTimeout(() => audioContext.close(), 60000);
         } else {
           const response = await fetch("/v1/chatterbox/speech", {
             method: "POST",
@@ -275,7 +275,7 @@
     };
 
     // On page load, fetch the existing uploaded files
-    document.addEventListener("DOMContentLoaded", refreshUploadedList);
+    // document.addEventListener("DOMContentLoaded", refreshUploadedList);
   </script>
 </body>
 </html>
