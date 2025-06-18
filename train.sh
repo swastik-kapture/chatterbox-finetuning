@@ -1,0 +1,26 @@
+#!/bin/bash
+python src/finetune_t3.py \
+    --output_dir ./checkpoints/chatterbox_finetuned \
+    --model_name_or_path swastik17/chatterbox \
+    --load_from_disk_dir /home/mldev/MLDatasetProjects/HubDatasets/IndicPodcastsEn \
+    --train_split_name train \
+    --eval_split_size 0.001 \
+    --num_train_epochs 1 \
+    --per_device_train_batch_size 12 \
+    --gradient_accumulation_steps 1 \
+    --learning_rate 5e-5 \
+    --warmup_steps 200 \
+    --logging_steps 16 \
+    --eval_strategy steps \
+    --eval_steps 1000 \
+    --save_strategy steps \
+    --save_steps 4000 \
+    --save_total_limit 4 \
+    --fp16 True \
+    --report_to tensorboard \
+    --dataloader_num_workers 16 \
+    --do_train --do_eval \
+    --dataloader_pin_memory False \
+    --eval_on_start True \
+    --label_names labels_speech \
+    --text_column_name text
